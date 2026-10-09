@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>締め日と資料提出リマインド日の一覧（1画面デモ）</title>
+<style>
+:root{--bg:#f7f6f2;--card:#fff;--ink:#222;--mute:#666;--line:#d9d6cc;--acc:#2f6f5e;--ng:#b3261e;--warn:#9a6700}
+@media(prefers-color-scheme:dark){:root{--bg:#1b1c1b;--card:#242625;--ink:#eee;--mute:#aaa;--line:#3b3e3c;--acc:#6fc3a9;--ng:#ff8a80;--warn:#e3b341}}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.6 system-ui,sans-serif}
+main{max-width:900px;margin:0 auto;padding:16px}
+h1{font-size:1.35rem;margin:.2em 0}h2{font-size:1.05rem;margin:1.2em 0 .4em}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin:12px 0;overflow-x:auto}
+.note{color:var(--mute);font-size:.88rem}
+input,select,textarea{font:inherit;font-size:.9rem;padding:5px;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--ink);box-sizing:border-box}
+textarea{width:100%;min-height:110px}
+button{font:inherit;padding:8px 13px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--ink);cursor:pointer;margin:4px 6px 4px 0}
+button.pri{background:var(--acc);color:var(--card);border-color:var(--acc);font-weight:600}
+table{border-collapse:collapse;width:100%;font-size:.9rem}th,td{border-bottom:1px solid var(--line);padding:5px 6px;text-align:left;white-space:nowrap}
+.warn{color:var(--warn);font-weight:600}.ng{color:var(--ng);font-weight:600}
+</style>
+</head>
+<body>
+<main>
+<h1>締め日と資料提出リマインド日の一覧</h1>
+<p class="note">顧客ごとの締め日と「何営業日前に送るか」を入れると、基準月と翌月のリマインド送信日（土日・祝日・年末年始を除く営業日で逆算）が一覧になります。</p>
+<div class="card note"><b>架空のサンプルが入っています。</b>消してご自身の内容を入れてください。入力は画面内だけで処理し、保存も外部送信もしません（再読み込みで消えます）。祝日は2026〜2027年分の固定リストで、それ以外の年が関わる日付には警告が出ます。送信前に必ずカレンダーで目視確認してください。</div>
+
+<h2>① 顧客と締め日</h2>
+<div class="card"><table id="tb"><thead><tr><th>顧客名</th><th>締め日</th><th>日</th><th>何営業日前に送る（カンマ区切り）</th><th></th></tr></thead><tbody></tbody></table>
+<button id="add">行を追加</button><button id="clr">サンプルを消す</button></div>
+<p>基準月 <input type="month" id="base"> <span class="note">（既定は今月。この月と翌月を出します）</span>
+<button class="pri" id="go">一覧にする</button></p>
+
+<h2>② リマインド送信日の一覧</h2>
+<div id="warn"></div>
+<div class="card"><table id="out"><thead><tr><th>送信日</th><th>顧客名</th><th>対象の締め日</th><th>営業日前</th><th></th></tr></thead><tbody></tbody></table></div>
+<button id="csv">CSVで書き出す</button>
+
+<h2>③ 定型文の下書き</h2>
+<p class="note">{顧客名}{締め日}{提出資料}は、一覧の各行の「文面コピー」で置き換わります。</p>
+<label>提出してほしい資料 <input id="doc" value="勤怠データ" size="20"></label>
+<textarea id="tpl">{顧客名} 様
+
+お世話になっております。{締め日}が締め日となりますので、{提出資料}のご共有をお願いいたします。
+お手数ですが、お早めにご対応いただけますと幸いです。</textarea>
+
+<script>
+/* ---- CALC-START (verify.mjs が読み出す。DOM に触れない) */
+// 内閣府「国民の祝日」（振替休日・国民の休日を含む）。確認できた年のみ登録。
+const HOLIDAYS = {
+  2026: ['01-01','01-12','02-11','02-23','03-20','04-29','05-03','05-04','05-05','05-06','07-20','08-11','09-21','09-22','09-23','10-12','11-03','11-23'],
+  2027: ['01-01','01-11','02-11','02-23','03-21','03-22','04-29','05-03','05-04','05-05','07-19','08-11','09-20','09-23','10-11','11-03','11-23']
+};
+const pad = n => String(n).padStart(2, '0');
+const key = d => d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+const mk = (y, m, d) => new Date(y, m - 1, d); // m は1始まり
+function isYearEnd(d) { const m = d.getMonth() + 1, x = d.getDate(); return (m === 12 && x >= 29) || (m === 1 && x <= 3); }
+function isHoliday(d) { const h = HOLIDAYS[d.getFullYear()]; return !!h && h.includes(pad(d.getMonth() + 1) + '-' + pad(d.getDate())); }
+function isBusiness(d) { const w = d.getDay(); return w !== 0 && w !== 6 && !isHoliday(d) && !isYearEnd(d); }
+// 締め日。N が月の日数を超える場合は月末に丸める（clamped=true）
+function closingDate(y, m, type, n) {
+  const last = new Date(y, m, 0).getDate();
+  if (type === 'eom') return { date: mk(y, m, last), clamped: false };
+  const day = Math.min(n, last);
+  return { date: mk(y, m, day), clamped: n > last };
+}
+// 締め日の k 営業日前（締め日当日は数えない）。k>=1
+function businessDaysBefore(date, k) {
+  const d = new Date(date.getTime()); let c = 0;
+  while (c < k) { d.setDate(d.getDate() - 1); if (isBusiness(d)) c++; }
+  return d;
+}
+// 関わる日付の年が祝日未登録なら、その年の配列を返す
+function unregisteredYears(dates) { return [...new Set(dates.map(d => d.getFullYear()))].filter(y => !HOLIDAYS[y]).sort(); }
+function parseOffsets(s) {
+  const a = String(s).split(/[,、，\s]+/).filter(Boolean).map(x => Number(x.replace(/[０-９]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0))));
+  return a.every(n => Number.isInteger(n) && n >= 1 && n <= 30) && a.length ? [...new Set(a)].sort((p, q) => q - p) : null;
+}
+function build(rows, baseY, baseM) {
+  const out = [], errs = [], warns = [];
+  rows.forEach((r, i) => {
+    const offs = parseOffsets(r.offsets);
+    const nameOk = r.name && r.name.trim();
+    if (!nameOk) { errs.push((i + 1) + '行目：顧客名が空です'); return; }
+    if (!offs) { errs.push(r.name + '：営業日前は1〜30の整数をカンマ区切りで入れてください'); return; }
+    if (r.type === 'day' && !(Number.isInteger(r.day) && r.day >= 1 && r.day <= 31)) { errs.push(r.name + '：締め日の「日」は1〜31です'); return; }
+    for (let k = 0; k < 2; k++) {
+      const y = baseY + Math.floor((baseM - 1 + k) / 12), m = (baseM - 1 + k) % 12 + 1;
+      const c = closingDate(y, m, r.type, r.day);
+      if (c.clamped) warns.push(r.name + '：' + y + '年' + m + '月は' + r.day + '日がないため月末に丸めました');
+      const sends = offs.map(o => ({ off: o, send: businessDaysBefore(c.date, o) }));
+      const un = unregisteredYears([c.date, ...sends.map(s => s.send)]);
+      sends.forEach(s => out.push({ name: r.name.trim(), closing: c.date, off: s.off, send: s.send, unreg: un }));
+    }
+  });
+  out.sort((a, b) => a.send - b.send || a.name.localeCompare(b.name, 'ja'));
+  return { out, errs, warns };
+}
+/* ---- CALC-END */
+
+const W = '日月火水木金土';
+const fmt = d => d.getFullYear() + '/' + pad(d.getMonth() + 1) + '/' + pad(d.getDate()) + '(' + W[d.getDay()] + ')';
+const $ = id => document.getElementById(id);
+const tb = $('tb').tBodies[0];
+function addRow(r) {
+  const tr = tb.insertRow();
+  tr.innerHTML = '<td><input class="nm" size="14"></td><td><select class="ty"><option value="day">毎月N日</option><option value="eom">月末</option></select></td><td><input class="dy" type="number" min="1" max="31" style="width:4em"></td><td><input class="of" size="10"></td><td><button type="button" class="rm">削除</button></td>';
+  tr.querySelector('.nm').value = r.name; tr.querySelector('.ty').value = r.type;
+  tr.querySelector('.dy').value = r.day || ''; tr.querySelector('.of').value = r.offsets;
+  const sync = () => { tr.querySelector('.dy').disabled = tr.querySelector('.ty').value === 'eom'; };
+  tr.querySelector('.ty').onchange = sync; sync();
+  tr.querySelector('.rm').onclick = () => tr.remove();
+}
+const rowsNow = () => [...tb.rows].map(tr => ({ name: tr.querySelector('.nm').value, type: tr.querySelector('.ty').value, day: Number(tr.querySelector('.dy').value) || 0, offsets: tr.querySelector('.of').value }));
+let last = [];
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+function render() {
+  const [by, bm] = $('base').value.split('-').map(Number);
+  if (!by) { $('warn').innerHTML = '<p class="ng">基準月を入れてください</p>'; return; }
+  const { out, errs, warns } = build(rowsNow(), by, bm);
+  last = out;
+  const unreg = [...new Set(out.flatMap(o => o.unreg))];
+  $('warn').innerHTML = errs.map(e => '<p class="ng">' + esc(e) + '</p>').join('') + warns.map(e => '<p class="warn">' + esc(e) + '</p>').join('')
+    + (unreg.length ? '<p class="warn">祝日未登録の年があります（' + unreg.join('・') + '年）。その年の祝日は考慮されていないため、該当行は目視で確認してください。</p>' : '');
+  $('out').tBodies[0].innerHTML = out.map((o, i) => '<tr><td' + (o.unreg.length ? ' class="warn"' : '') + '>' + fmt(o.send) + (o.unreg.length ? ' ※祝日未登録' : '') + '</td><td>' + esc(o.name) + '</td><td>' + fmt(o.closing) + '</td><td>' + o.off + '営業日前</td><td><button type="button" data-i="' + i + '">文面コピー</button></td></tr>').join('');
+}
+$('out').onclick = async e => {
+  const i = e.target.dataset && e.target.dataset.i; if (i == null) return;
+  const o = last[i];
+  const t = $('tpl').value.split('{顧客名}').join(o.name).split('{締め日}').join(fmt(o.closing).replace(/\(.\)/, m => m)).split('{提出資料}').join($('doc').value);
+  try { await navigator.clipboard.writeText(t); e.target.textContent = 'コピーしました'; } catch { $('tpl').value = t; e.target.textContent = '下書き欄に出しました'; }
+};
+$('csv').onclick = () => {
+  // 先頭が = + - @ のセルは式として解釈されないよう ' を付ける
+  const q = v => { v = String(v); if (/^[=+\-@]/.test(v)) v = "'" + v; return '"' + v.replace(/"/g, '""') + '"'; };
+  const lines = [['送信日', '顧客名', '締め日', '営業日前'].map(q).join(',')].concat(last.map(o => [fmt(o.send), o.name, fmt(o.closing), o.off].map(q).join(',')));
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob(['﻿' + lines.join('\r\n')], { type: 'text/csv' }));
+  a.download = 'reminder-dates.csv'; a.click();
+};
+$('add').onclick = () => addRow({ name: '', type: 'day', day: 25, offsets: '3,1' });
+$('clr').onclick = () => { tb.innerHTML = ''; addRow({ name: '', type: 'day', day: 25, offsets: '3,1' }); };
+$('go').onclick = render;
+const t0 = new Date(); $('base').value = t0.getFullYear() + '-' + pad(t0.getMonth() + 1);
+[{ name: 'サンプル商店（架空）', type: 'day', day: 20, offsets: '3,1' }, { name: 'サンプル工務店（架空）', type: 'eom', day: 0, offsets: '3,1' }, { name: 'サンプル食堂（架空）', type: 'day', day: 15, offsets: '2' }].forEach(addRow);
+render();
+</script>
+</main>
+</body>
+</html>
